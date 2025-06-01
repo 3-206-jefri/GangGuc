@@ -6,7 +6,44 @@
 
 ## 1. Penjelasan Singkat
 
-GangGuc merupakan proyek Tugas Besar mata kuliah Strategi Teknik Informatika Strategi Algoritma yang melibatkan pengembangan bot AI untuk bermain dalam game berbasis maze dengan strategi tertentu. Bot diimplementasikan menggunakan Python dan berinteraksi dengan game engine berbasis web menggunakan API.
+Konsep Dasar:
+Algoritma ini menggunakan pendekatan greedy - selalu memilih keputusan terbaik di setiap langkah tanpa mempertimbangkan konsekuensi jangka panjang.
+Strategi Utama:
+
+Prioritas Pulang ke Base:
+
+Jika inventory penuh → langsung pulang
+Jika setengah penuh + dekat base (≤3 unit) → pulang juga
+Jika di samping base + bawa diamond → masuk ke base
+
+
+Pemilihan Diamond (Greedy):
+
+Urutkan diamond berdasarkan: nilai tertinggi dulu, lalu jarak terdekat
+Prioritaskan diamond dengan poin > 1
+Jika inventory < setengah penuh → fokus cari diamond bernilai tinggi
+Diamond dengan poin = 1 hanya diambil jika tidak ada pilihan lain
+
+
+Pergerakan:
+
+Gerak diagonal diprioritaskan (pilih sumbu dengan jarak terbesar dulu)
+Jika terhalang, coba arah alternatif
+Fallback ke semua arah yang valid
+
+
+
+Keunggulan:
+
+Efisien dalam mengumpulkan diamond bernilai tinggi
+Mengoptimalkan perjalanan pulang-pergi
+Adaptif terhadap situasi inventory
+
+Kelemahan:
+
+Tidak mempertimbangkan kompetisi dengan bot lain
+Bisa terjebak di area tanpa diamond bernilai tinggi
+Tidak menggunakan portal teleport yang sudah di-load
 
 ---
 
