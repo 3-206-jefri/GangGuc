@@ -4,12 +4,11 @@ from game.models import GameObject, Board, Position
 
 class GreedySlametLogic(BaseLogic):
     def __init__(self):
-        self.base_return_threshold = 2
-        self.safe_enemy_distance = 5
+        self.base_return_threshold = 3
+        self.safe_enemy_distance = 4
         self.visited_positions = set()
-        self.tackle_distance = 2
-        self.min_diamonds_to_tackle = 2
-        self.aggressive_mode_threshold = 5
+        self.last_move = (0, 0)  # Track last move to prevent oscillation
+        self.stuck_counter = 0   # Counter for when bot is stuck
 
     def next_move(self, board_bot: GameObject, board: Board) -> Tuple[int, int]:
         self.board = board
@@ -20,85 +19,118 @@ class GreedySlametLogic(BaseLogic):
         diamonds_in_inventory = self.my_bot.properties.diamonds
         inventory_size = self.my_bot.properties.inventory_size
 
-        # Determine if we should be aggressive based on diamonds collected
-        is_aggressive = diamonds_in_inventory >= self.aggressive_mode_threshold
+        # Check for nearby enemies
+        enemies_close = self.enemies_within_distance(self.safe_enemy_distance)
 
-        # Check for tackle opportunities
-        tackle_target = self.should_tackle(is_aggressive)
-        if tackle_target:
-            print(f"Attempting to tackle enemy at {tackle_target.position}")
-            return self.tackle(tackle_target)
-
-        # Adjust safe distance based on mode
-        current_safe_distance = self.safe_enemy_distance if not is_aggressive else 3
-        enemies_close = self.enemies_within_distance(current_safe_distance)
-
-        # If enemies are too close and we can't tackle, retreat to base
-        if enemies_close and dist_to_base > 0 and not is_aggressive:
-            print("Enemy nearby! Retreating to base for safety.")
-            return self.move_towards_base()
+        # If enemies are too close, attempt to tackle or retreat
+        if enemies_close and dist_to_base > 0:
+            tackle_move = self.attempt_tackle(enemies_close)
+            if tackle_move:
+                print(f"Tackling enemy at {tackle_move}")
+                self.reset_stuck_counter()
+                return tackle_move
+            
+            print("Enemy nearby! Finding safe retreat path.")
+            retreat_move = self.safe_retreat()
+            if retreat_move != (0, 0):
+                self.reset_stuck_counter()
+                return retreat_move
 
         # If inventory is nearly full or time is critical, return to base
-        if (diamonds_in_inventory >= inventory_size - self.base_return_threshold or 
-            time_left <= dist_to_base + 3):
+        if diamonds_in_inventory >= inventory_size - self.base_return_threshold or time_left <= dist_to_base + 2:
             if diamonds_in_inventory > 0:
                 print("Inventory nearly full or time short. Returning to base.")
-                return self.move_towards_base()
+                move = self.move_towards_base()
+                if move != (0, 0):
+                    self.reset_stuck_counter()
+                    return move
 
-        # Gather diamonds with adaptive search
-        search_radius = self.adaptive_search_radius(diamonds_in_inventory, is_aggressive)
+        # Gather diamonds within an adaptive search radius
+        search_radius = self.adaptive_search_radius(diamonds_in_inventory)
         nearby_diamonds = self.get_collectable_diamonds(search_radius, inventory_size - diamonds_in_inventory)
 
         if nearby_diamonds:
-            best_diamond = self.choose_best_diamond_advanced(nearby_diamonds, is_aggressive)
+            best_diamond = self.choose_best_diamond(nearby_diamonds)
             print(f"Moving towards diamond at {best_diamond.position} worth {best_diamond.properties.points}.")
-            return self.move_towards_with_teleporter(best_diamond.position)
+            move = self.move_towards_with_teleporter(best_diamond.position)
+            if move != (0, 0):
+                self.reset_stuck_counter()
+                return move
 
-        # No diamonds found, explore intelligently
-        print("No diamonds nearby, exploring intelligently.")
-        return self.explore_intelligently(is_aggressive)
-
-    def should_tackle(self, is_aggressive: bool) -> Optional[GameObject]:
-        """Determine if we should tackle an enemy"""
-        if self.my_bot.properties.diamonds < self.min_diamonds_to_tackle:
-            return None
-            
-        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        best_target = None
-        best_score = 0
+        # No diamonds found, explore unvisited safe tiles
+        print("No diamonds nearby, exploring unvisited safe area.")
+        move = self.explore_unvisited()
+        if move != (0, 0):
+            self.reset_stuck_counter()
+            return move
         
-        for enemy in enemies:
-            distance = self.distance_with_teleporter(self.my_bot.position, enemy.position)
+        # If all else fails, try random safe move
+        random_move = self.get_random_safe_move()
+        if random_move != (0, 0):
+            self.reset_stuck_counter()
+            return random_move
             
-            # Calculate tackle score
-            if distance <= self.tackle_distance:
-                enemy_diamonds = enemy.properties.diamonds
-                base_dist = self.distance_with_teleporter(enemy.position, self.my_bot.properties.base)
+        # Last resort - stay in place
+        print("No safe moves available, staying in place.")
+        return (0, 0)
+
+    def reset_stuck_counter(self):
+        self.stuck_counter = 0
+
+    def safe_retreat(self) -> Tuple[int, int]:
+        """Find a safe retreat path away from enemies"""
+        possible_moves = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        safe_moves = []
+        
+        for move in possible_moves:
+            new_x = self.my_bot.position.x + move[0]
+            new_y = self.my_bot.position.y + move[1]
+            new_position = Position(new_x, new_y)
+            
+            if self.is_position_safe_and_valid(new_position):
+                # Calculate distance from enemies at new position
+                min_enemy_dist = float('inf')
+                enemies = [bot for bot in self.board.bots if bot != self.my_bot]
                 
-                # Score: more diamonds = better, closer to our base = better
-                tackle_score = enemy_diamonds - (base_dist * 0.1)
+                for enemy in enemies:
+                    dist = self.distance(new_position, enemy.position)
+                    min_enemy_dist = min(min_enemy_dist, dist)
                 
-                # In aggressive mode or if enemy has many diamonds
-                if (is_aggressive and enemy_diamonds >= 2) or enemy_diamonds >= 4:
-                    if tackle_score > best_score:
-                        best_score = tackle_score
-                        best_target = enemy
+                safe_moves.append((move, min_enemy_dist))
         
-        return best_target
-
-    def tackle(self, target: GameObject) -> Tuple[int, int]:
-        """Move towards enemy to tackle them"""
-        return self.move_towards_with_teleporter(target.position)
-
-    def adaptive_search_radius(self, diamonds_in_inventory: int, is_aggressive: bool) -> int:
-        """Dynamic search radius based on inventory and mode"""
-        base_radius = 18 if diamonds_in_inventory < 2 else 12
+        if safe_moves:
+            # Choose move that maximizes distance from nearest enemy
+            safe_moves.sort(key=lambda x: x[1], reverse=True)
+            return safe_moves[0][0]
         
-        # Increase radius in aggressive mode for better opportunities
-        if is_aggressive:
-            base_radius += 3
+        return (0, 0)
+
+    def get_random_safe_move(self) -> Tuple[int, int]:
+        """Get a random safe move when other strategies fail"""
+        possible_moves = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        safe_moves = []
+        
+        for move in possible_moves:
+            new_x = self.my_bot.position.x + move[0]
+            new_y = self.my_bot.position.y + move[1]
+            new_position = Position(new_x, new_y)
             
-        return base_radius
+            if self.is_position_safe_and_valid(new_position):
+                # Avoid going back to last position if possible
+                if move != (-self.last_move[0], -self.last_move[1]) or len(safe_moves) == 0:
+                    safe_moves.append(move)
+        
+        if safe_moves:
+            # If we have multiple safe moves, prefer ones that don't reverse last move
+            filtered_moves = [move for move in safe_moves if move != (-self.last_move[0], -self.last_move[1])]
+            if filtered_moves:
+                return filtered_moves[0]
+            return safe_moves[0]
+        
+        return (0, 0)
+
+    def adaptive_search_radius(self, diamonds_in_inventory: int) -> int:
+        return 15 if diamonds_in_inventory < 3 else 10
 
     def enemies_within_distance(self, n: int) -> List[GameObject]:
         enemies = [bot for bot in self.board.bots if bot != self.my_bot]
@@ -113,99 +145,42 @@ class GreedySlametLogic(BaseLogic):
                 diamonds.append(d)
         return diamonds
 
-    def choose_best_diamond_advanced(self, diamonds: List[GameObject], is_aggressive: bool) -> GameObject:
-        """Advanced diamond selection with risk assessment"""
-        scored_diamonds = []
-        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        
-        for diamond in diamonds:
-            distance = self.distance_with_teleporter(self.my_bot.position, diamond.position)
-            points = diamond.properties.points
-            
-            # Calculate risk (proximity to enemies)
-            min_enemy_dist = min([self.distance_with_teleporter(diamond.position, e.position) 
-                                 for e in enemies], default=100)
-            
-            # Base score: points per distance
-            efficiency = points / max(1, distance)
-            
-            # Risk factor
-            if is_aggressive:
-                # In aggressive mode, take more risks for high value diamonds
-                risk_penalty = 0 if min_enemy_dist >= 2 else (3 - min_enemy_dist) * 0.3
-            else:
-                # In safe mode, heavily penalize risky diamonds
-                risk_penalty = 0 if min_enemy_dist >= 4 else (5 - min_enemy_dist) * 0.8
-            
-            # Bonus for high-value diamonds
-            value_bonus = 0.5 if points >= 3 else 0
-            
-            total_score = efficiency + value_bonus - risk_penalty
-            scored_diamonds.append((diamond, total_score))
-        
-        return max(scored_diamonds, key=lambda x: x[1])[0]
+    def choose_best_diamond(self, diamonds: List[GameObject]) -> GameObject:
+        diamonds_sorted = sorted(
+            diamonds,
+            key=lambda d: (-d.properties.points, self.distance_with_teleporter(self.my_bot.position, d.position))
+        )
+        return diamonds_sorted[0]
 
-    def explore_intelligently(self, is_aggressive: bool) -> Tuple[int, int]:
-        """Intelligent exploration considering board coverage and diamond likelihood"""
-        candidate_tiles = self.get_smart_exploration_tiles()
-        
-        if not candidate_tiles:
-            return self.move_towards_base()
-        
+    def explore_unvisited(self) -> Tuple[int, int]:
+        candidate_tiles = self.get_adjacent_positions(self.my_bot.position)
         safe_tiles = []
-        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        
+
         for tile in candidate_tiles:
-            min_enemy_dist = min([self.distance_with_teleporter(tile, e.position) 
-                                 for e in enemies], default=100)
-            
-            safe_distance = 3 if is_aggressive else self.safe_enemy_distance
-            
-            if (min_enemy_dist > safe_distance and 
-                (tile.x, tile.y) not in self.visited_positions):
-                
-                # Score exploration candidates
-                center = Position(self.board.height // 2, self.board.width // 2)
-                center_proximity = 10 - self.distance_with_teleporter(tile, center)
-                
-                # Prefer unexplored corners and edges for diamonds
-                edge_bonus = 2 if (tile.x <= 2 or tile.x >= self.board.height-3 or 
-                                  tile.y <= 2 or tile.y >= self.board.width-3) else 0
-                
-                exploration_score = min_enemy_dist + center_proximity + edge_bonus
-                safe_tiles.append((tile, exploration_score))
+            if (tile.x, tile.y) not in self.visited_positions and self.is_safe_and_valid_position(tile):
+                safe_tiles.append(tile)
+
+        if not safe_tiles:
+            # If no unvisited safe tiles, try any safe tile
+            for tile in candidate_tiles:
+                if self.is_safe_and_valid_position(tile):
+                    safe_tiles.append(tile)
 
         if not safe_tiles:
             return self.move_towards_base()
 
-        best_tile = max(safe_tiles, key=lambda t: t[1])[0]
+        best_tile = safe_tiles[0]
         self.visited_positions.add((best_tile.x, best_tile.y))
-        print(f"Exploring intelligently towards {best_tile}")
-        return self.move_towards_with_teleporter(best_tile)
+        print(f"Exploring safe area towards {best_tile}")
+        return self.calculate_move_to_position(best_tile)
 
-    def get_smart_exploration_tiles(self) -> List[Position]:
-        """Get strategic exploration positions"""
-        positions = []
-        current_pos = self.my_bot.position
-        
-        # Get positions in expanding circles
-        for radius in range(1, 4):
-            for dx in range(-radius, radius + 1):
-                for dy in range(-radius, radius + 1):
-                    if abs(dx) == radius or abs(dy) == radius:  # Only perimeter
-                        new_pos = Position(current_pos.x + dx, current_pos.y + dy)
-                        if (0 <= new_pos.x < self.board.height and 
-                            0 <= new_pos.y < self.board.width):
-                            positions.append(new_pos)
-        
-        return positions
-
-    def is_safe(self, tile: Position, safe_distance: int = None) -> bool:
-        if safe_distance is None:
-            safe_distance = self.safe_enemy_distance
-            
+    def is_safe(self, tile: Position) -> bool:
         enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        return all(self.distance_with_teleporter(tile, e.position) > safe_distance for e in enemies)
+        return all(self.distance_with_teleporter(tile, e.position) > self.safe_enemy_distance for e in enemies)
+
+    def is_safe_and_valid_position(self, position: Position) -> bool:
+        """Check if position is both safe and valid"""
+        return self.is_position_safe_and_valid(position) and self.is_safe(position)
 
     def get_adjacent_positions(self, pos: Position) -> List[Position]:
         candidates = [
@@ -230,21 +205,117 @@ class GreedySlametLogic(BaseLogic):
         tele_distance_2 = self.distance(a, tele2.position) + self.distance(tele1.position, b)
         return min(direct_distance, tele_distance_1, tele_distance_2)
 
-    def move_towards(self, target: Position) -> Tuple[int, int]:
+    def attempt_tackle(self, enemies: List[GameObject]) -> Optional[Tuple[int, int]]:
+        """Attempt to tackle an enemy if advantageous"""
+        for enemy in enemies:
+            if self.distance(self.my_bot.position, enemy.position) == 1:
+                # Check if we have an advantage (more diamonds or points)
+                if (self.my_bot.properties.diamonds > enemy.properties.diamonds or 
+                    self.my_bot.properties.score > enemy.properties.score):
+                    delta_x = enemy.position.x - self.my_bot.position.x
+                    delta_y = enemy.position.y - self.my_bot.position.y
+                    return (delta_x, delta_y)
+        return None
+
+    def calculate_move_to_position(self, target: Position) -> Tuple[int, int]:
+        """Calculate the move needed to reach target position"""
         delta_x = target.x - self.my_bot.position.x
         delta_y = target.y - self.my_bot.position.y
+        
+        # Normalize to single step
+        if delta_x != 0:
+            delta_x = 1 if delta_x > 0 else -1
+        if delta_y != 0:
+            delta_y = 1 if delta_y > 0 else -1
+            
+        return (delta_x, delta_y)
+
+    def move_towards(self, target: Position) -> Tuple[int, int]:
+        """Improved move_towards with better conflict resolution"""
+        delta_x = target.x - self.my_bot.position.x
+        delta_y = target.y - self.my_bot.position.y
+        
+        # Choose primary direction
         if abs(delta_x) > abs(delta_y):
-            step = (1 if delta_x > 0 else -1, 0)
+            primary_step = (1 if delta_x > 0 else -1, 0)
+            secondary_step = (0, 1 if delta_y > 0 else -1) if delta_y != 0 else None
         else:
-            step = (0, 1 if delta_y > 0 else -1)
+            primary_step = (0, 1 if delta_y > 0 else -1)
+            secondary_step = (1 if delta_x > 0 else -1, 0) if delta_x != 0 else None
 
-        new_x = self.my_bot.position.x + step[0]
-        new_y = self.my_bot.position.y + step[1]
+        # Try primary direction
+        new_position = Position(
+            self.my_bot.position.x + primary_step[0], 
+            self.my_bot.position.y + primary_step[1]
+        )
 
-        if 0 <= new_x < self.board.height and 0 <= new_y < self.board.width:
-            return step
-        else:
-            return (-step[0], -step[1])
+        if self.is_position_safe_and_valid(new_position):
+            self.last_move = primary_step
+            return primary_step
+
+        # Try secondary direction if available
+        if secondary_step:
+            new_position = Position(
+                self.my_bot.position.x + secondary_step[0], 
+                self.my_bot.position.y + secondary_step[1]
+            )
+            if self.is_position_safe_and_valid(new_position):
+                self.last_move = secondary_step
+                return secondary_step
+
+        # Try to tackle if enemy is blocking
+        enemies_in_primary = [bot for bot in self.board.bots 
+                             if bot != self.my_bot and bot.position.x == new_position.x and bot.position.y == new_position.y]
+        
+        if enemies_in_primary:
+            tackle_move = self.attempt_tackle(enemies_in_primary)
+            if tackle_move:
+                self.last_move = tackle_move
+                return tackle_move
+
+        # Find any safe alternative move
+        alternative_move = self.find_safe_alternative_move()
+        if alternative_move:
+            self.last_move = alternative_move
+            return alternative_move
+
+        return (0, 0)
+
+    def find_safe_alternative_move(self) -> Optional[Tuple[int, int]]:
+        """Find any safe alternative move"""
+        possible_moves = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        
+        for move in possible_moves:
+            new_x = self.my_bot.position.x + move[0]
+            new_y = self.my_bot.position.y + move[1]
+            new_position = Position(new_x, new_y)
+            
+            if self.is_position_safe_and_valid(new_position):
+                # Avoid reversing last move if possible
+                if move != (-self.last_move[0], -self.last_move[1]):
+                    return move
+        
+        # If all moves would reverse, allow it as last resort
+        for move in possible_moves:
+            new_x = self.my_bot.position.x + move[0]
+            new_y = self.my_bot.position.y + move[1]
+            new_position = Position(new_x, new_y)
+            
+            if self.is_position_safe_and_valid(new_position):
+                return move
+                
+        return None
+
+    def is_position_safe_and_valid(self, position: Position) -> bool:
+        """Check if position is within bounds and not occupied by other bots"""
+        if not (0 <= position.x < self.board.height and 0 <= position.y < self.board.width):
+            return False
+        
+        # Check for other bots in the position
+        for bot in self.board.bots:
+            if bot != self.my_bot and bot.position.x == position.x and bot.position.y == position.y:
+                return False
+        return True
 
     def move_towards_with_teleporter(self, dest: Position) -> Tuple[int, int]:
         dist_direct = self.distance(self.my_bot.position, dest)
