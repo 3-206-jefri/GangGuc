@@ -8,13 +8,12 @@ from game.bot_handler import BotHandler
 from game.logic.JamalKopling import GreedyJamalLogic
 from game.util import *
 from game.logic.base import BaseLogic
-from game.logic.SlametKopling import GreedySlametLogic
 
 init()
 BASE_URL = "http://localhost:3000/api"
 DEFAULT_BOARD_ID = 1
 CONTROLLERS = {
-    "Random": GreedyJamalLogic
+    "Random" : GreedyJamalLogic
 }
 
 ###############################################################################
