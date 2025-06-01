@@ -1,153 +1,248 @@
-from typing import Optional, List, Tuple
+from typing import Tuple, List, Optional
+import math
+from game.models import Board, GameObject, Position
 from game.logic.base import BaseLogic
-from game.models import GameObject, Board, Position
 
 class GreedyJamalLogic(BaseLogic):
+    def __init__(self): # Inisialisasi properti bot
+        self.portals: List[GameObject] = []
+        self.portal_map = {}
+        self.last_position: Optional[Position] = None # Melacak posisi terakhir untuk mencegah maju-mundur
+        self.visited_positions = {} # Melacak posisi yang dikunjungi untuk eksplorasi
+        self.turn_counter = 0 # Penghitung giliran untuk meluruhkan posisi yang dikunjungi
+        self.my_bot: Optional[GameObject] = None # Referensi bot saat ini
+        self.board: Optional[Board] = None # Referensi papan permainan saat ini
 
-    def __init__(self):
-        self.search_radius = 12
-        self.safe_return_margin = 2
-        self.safe_enemy_distance = 3
-        self.visited_positions = set()
+    def next_move(self, bot: GameObject, board: Board) -> Tuple[int, int]:
+        self.my_bot = bot # Menetapkan bot saat ini agar dapat diakses di fungsi lain
+        self.board = board # Menetapkan papan saat ini agar dapat diakses di fungsi lain
+        self.turn_counter += 1 # Memperbarui penghitung giliran
 
-    def next_move(self, board_bot: GameObject, board: Board) -> Tuple[int, int]:
-        self.board = board
-        self.my_bot = board_bot
+        pos = bot.position
+        props = bot.properties
 
-        time_left = self.my_bot.properties.milliseconds_left // 1000
-        dist_to_base = self.distance_with_teleporter(self.my_bot.position, self.my_bot.properties.base)
-        diamonds_in_inventory = self.my_bot.properties.diamonds
-        inventory_size = self.my_bot.properties.inventory_size
+        # Memperbarui posisi terakhir sebelum bergerak
+        current_position = bot.position
+        self.visited_positions[(current_position.x, current_position.y)] = self.turn_counter
 
-        enemies_close = self.enemies_within_distance(self.safe_enemy_distance)
+        if not self.portals:
+            self._load_portals(board)
 
-        # If enemies too close, retreat to base immediately
-        if enemies_close and dist_to_base > 0:
-            print("Enemy nearby! Retreating to base for safety.")
-            return self.move_towards_base()
+        # Prioritas 1: Segera pulang jika inventaris penuh
+        # Atau jika sudah mengumpulkan sejumlah berlian dan markas sudah dekat
+        min_diamonds_to_return = 3 # Jumlah minimum berlian untuk kembali ke markas
+        if props.diamonds >= props.inventory_size or \
+           (props.diamonds >= min_diamonds_to_return and self._manhattan(pos, props.base) <= 5):
+            print(f"Inventaris penuh ({props.diamonds}/{props.inventory_size}) atau berlian cukup dan markas dekat. Kembali ke markas.")
+            move = self._go_home(pos, props.base, board)
+            self.last_position = current_position
+            return move
 
-        # Return to base if almost full or time critical considering margin
-        if diamonds_in_inventory >= inventory_size - 1 or time_left <= dist_to_base + self.safe_return_margin:
-            if diamonds_in_inventory > 0:
-                print("Inventory nearly full or time short. Returning to base.")
-                return self.move_towards_base()
+        # Prioritas 2: Cari dan bergerak menuju berlian
+        diamond = self._select_diamond(bot, board)
+        if diamond:
+            print(f"Bergerak menuju berlian di {diamond.position}")
+            move = self._head_to(pos, diamond.position, board)
+            self.last_position = current_position
+            return move
+        
+        # Fallback: Jika tidak ada berlian yang cocok, coba jelajahi area dengan aman
+        print("Tidak ada berlian yang cocok ditemukan, menjelajahi.")
+        move = self._explore_safely(pos, board) # Menggunakan fungsi eksplorasi
+        self.last_position = current_position
+        return move
 
-        # Gather diamonds within search radius
-        nearby_diamonds = self.get_collectable_diamonds(self.search_radius, inventory_size - diamonds_in_inventory)
-        if nearby_diamonds:
-            best_diamond = self.choose_best_diamond(nearby_diamonds)
-            print(f"Moving towards diamond at {best_diamond.position} worth {best_diamond.properties.points}.")
-            return self.move_towards_with_teleporter(best_diamond.position)
+    def _load_portals(self, board: Board):
+        """Memetakan portal berdasarkan objek di papan."""
+        self.portals = list(filter(lambda obj: obj.type == "TeleportGameObject", board.game_objects))
+        if len(self.portals) >= 2:
+            first, second = self.portals[0], self.portals[1]
+            self.portal_map = {first.id: second, second.id: first}
 
-        # No diamonds found, explore less visited safe tiles nearby
-        print("No diamonds nearby, exploring safe area.")
-        return self.explore_safely()
+    def _go_home(self, start: Position, home: Position, board: Board) -> Tuple[int, int]:
+        """Menghasilkan langkah untuk kembali ke markas."""
+        return self._path_with_portal(start, home, board)
 
-    def enemies_within_distance(self, n: int) -> List[GameObject]:
-        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        close_enemies = [e for e in enemies if self.distance_with_teleporter(self.my_bot.position, e.position) <= n]
-        return close_enemies
+    def _head_to(self, start: Position, destination: Position, board: Board) -> Tuple[int, int]:
+        """Menghasilkan langkah menuju tujuan tertentu."""
+        return self._path_with_portal(start, destination, board)
 
-    def get_collectable_diamonds(self, radius: int, capacity_left: int) -> List[GameObject]:
-        diamonds = []
-        for d in self.board.diamonds:
-            dist = self.distance_with_teleporter(self.my_bot.position, d.position)
-            if dist <= radius and d.properties.points <= capacity_left:
-                diamonds.append(d)
-        return diamonds
+    def _path_with_portal(self, start: Position, goal: Position, board: Board) -> Tuple[int, int]:
+        """Menghitung jalur terbaik menuju tujuan, mempertimbangkan penggunaan portal."""
+        best_move = self._naive_step(start, goal, board)
+        best_distance = self._manhattan(start, goal)
 
-    def choose_best_diamond(self, diamonds: List[GameObject]) -> GameObject:
-        # Sort by diamond points descending, then by distance ascending
-        diamonds_sorted = sorted(
-            diamonds,
-            key=lambda d: (-d.properties.points, self.distance_with_teleporter(self.my_bot.position, d.position))
-        )
-        return diamonds_sorted[0]
+        for p in self.portals:
+            linked = self.portal_map.get(p.id)
+            if linked:
+                # Jarak melalui portal: (jarak ke portal pertama) + (jarak dari portal kedua ke tujuan)
+                dist_via_portal = self._manhattan(start, p.position) + self._manhattan(linked.position, goal)
+                
+                if dist_via_portal < best_distance:
+                    # Jika teleportasi lebih efisien, bergerak ke portal
+                    best_distance = dist_via_portal
+                    best_move = self._step_towards(start, p.position)
+                    # Cek jika sudah di samping portal
+                    if self._adjacent(start, p.position):
+                        return best_move # Langsung ke portal jika sudah di sebelahnya
+        return best_move
 
-    def explore_safely(self) -> Tuple[int, int]:
-        # Explore tiles around that are farthest from enemies and closer to center, also considering board boundaries
-        center = Position(self.board.height // 2, self.board.width // 2)
-        candidate_tiles = self.get_adjacent_positions(self.my_bot.position)
+    def _select_diamond(self, bot: GameObject, board: Board) -> Optional[GameObject]:
+        """Pilih berlian yang tidak memiliki pasangan dan prioritaskan poin tertinggi."""
+        possible = [d for d in board.diamonds if d.properties.pair_id is None]
+        
+        # Jika bot sudah punya banyak berlian (misal setengah kapasitas), fokus ke berlian poin rendah
+        if bot.properties.diamonds >= bot.properties.inventory_size / 2:
+            # Coba cari berlian poin tinggi dulu, baru poin rendah jika ada.
+            high_value_diamonds = [d for d in possible if d.properties.points > 1]
+            if high_value_diamonds:
+                return sorted(high_value_diamonds, key=lambda d: self._euclidean(bot.position, d.position))[0]
+            
+            # Jika tidak ada berlian bernilai tinggi, ambil yang poin 1
+            low_value_diamonds = [d for d in possible if d.properties.points == 1]
+            if low_value_diamonds:
+                return sorted(low_value_diamonds, key=lambda d: self._euclidean(bot.position, d.position))[0]
 
-        safe_tiles = []
-        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
-        for tile in candidate_tiles:
-            dist_to_enemy = min([self.distance_with_teleporter(tile, e.position) for e in enemies], default=100)
-            if dist_to_enemy > self.safe_enemy_distance and (tile.x, tile.y) not in self.visited_positions:
-                safe_tiles.append((tile, dist_to_enemy))
+        # Jika inventaris kosong atau belum banyak, prioritaskan poin tertinggi
+        if possible:
+            # Urutkan berdasarkan poin menurun, lalu jarak menaik
+            return sorted(possible, key=lambda d: (-d.properties.points, self._euclidean(bot.position, d.position)))[0]
 
-        if not safe_tiles:
-            return self.move_towards_base()
+        return None
 
-        # Pick tile with max enemy distance, tie break closer to center
-        best_tile = max(safe_tiles, key=lambda t: (t[1], -self.distance_with_teleporter(t[0], center)))[0]
-        self.visited_positions.add((best_tile.x, best_tile.y))  # Mark as visited
-        print(f"Exploring safely towards {best_tile}")
-        return self.move_towards_with_teleporter(best_tile)
+    def _naive_step(self, src: Position, dst: Position, board: Board) -> Tuple[int, int]:
+        """Menghasilkan langkah satu petak menuju tujuan secara langsung."""
+        dx = dst.x - src.x
+        dy = dst.y - src.y
 
-    def get_adjacent_positions(self, pos: Position) -> List[Position]:
-        candidates = [
-            Position(pos.x + 1, pos.y),
-            Position(pos.x - 1, pos.y),
-            Position(pos.x, pos.y + 1),
-            Position(pos.x, pos.y - 1)
-        ]
-        valid_positions = [p for p in candidates if 0 <= p.x < self.board.height and 0 <= p.y < self.board.width]
-        return valid_positions
+        # Coba bergerak di sumbu yang memiliki jarak absolut lebih besar terlebih dahulu
+        if abs(dx) >= abs(dy):
+            step_x = 1 if dx > 0 else -1 if dx < 0 else 0
+            if step_x != 0 and self._is_valid_and_safe_move(src, (step_x, 0)):
+                return (step_x, 0)
+            
+            step_y = 1 if dy > 0 else -1 if dy < 0 else 0
+            if step_y != 0 and self._is_valid_and_safe_move(src, (0, step_y)):
+                return (0, step_y)
+        else:
+            step_y = 1 if dy > 0 else -1 if dy < 0 else 0
+            if step_y != 0 and self._is_valid_and_safe_move(src, (0, step_y)):
+                return (0, step_y)
+            
+            step_x = 1 if dx > 0 else -1 if dx < 0 else 0
+            if step_x != 0 and self._is_valid_and_safe_move(src, (step_x, 0)):
+                return (step_x, 0)
 
-    def distance(self, a: Position, b: Position) -> int:
+        # Fallback: cari arah legal pertama yang aman dan tidak mundur
+        move = self._find_safe_alternative_move(current_pos=self.my_bot.position, avoid_reverse=True)
+        if move != (0,0):
+            return move
+
+        # Fallback terakhir: coba gerakan mundur jika tidak ada pilihan lain
+        move = self._find_safe_alternative_move(current_pos=self.my_bot.position, avoid_reverse=False)
+        if move != (0,0):
+            return move
+
+        return (0, 0) # Tetap di tempat jika tidak ada gerakan yang valid
+
+    def _is_valid_and_safe_move(self, current_pos: Position, move: Tuple[int, int]) -> bool:
+        """Memeriksa apakah gerakan menghasilkan posisi yang valid dan aman."""
+        new_x = current_pos.x + move[0]
+        new_y = current_pos.y + move[1]
+        new_position = Position(new_x, new_y)
+
+        # Cek batas papan
+        if not (0 <= new_x < self.board.height and 0 <= new_y < self.board.width):
+            return False
+        
+        # Cek apakah ada bot lain di posisi tujuan
+        for other_bot in self.board.bots:
+            # Pastikan bukan bot kita sendiri dan posisi sama
+            if other_bot.id != self.my_bot.id and other_bot.position.x == new_x and other_bot.position.y == new_y:
+                return False
+        
+        # Cek apakah ada teleporter di posisi tujuan (ini tidak menghalangi gerakan, hanya tujuan)
+        # Logika lebih lanjut untuk portal ditangani di _path_with_portal
+        
+        return True
+
+    def _step_towards(self, src: Position, dest: Position) -> Tuple[int, int]:
+        """Menghasilkan langkah satu petak menuju tujuan jika berdekatan."""
+        dx = dest.x - src.x
+        dy = dest.y - src.y
+
+        if abs(dx) + abs(dy) == 1: # Hanya jika berdekatan
+            return (dx, dy)
+        return (0, 0) # Jangan bergerak jika tidak berdekatan
+
+    def _adjacent(self, a: Position, b: Position) -> bool:
+        """Memeriksa apakah dua posisi berdekatan (Manhattan distance 1)."""
+        return abs(a.x - b.x) + abs(a.y - b.y) == 1
+
+    def _manhattan(self, a: Position, b: Position) -> int:
+        """Menghitung jarak Manhattan antara dua posisi."""
         return abs(a.x - b.x) + abs(a.y - b.y)
 
-    def distance_with_teleporter(self, a: Position, b: Position) -> int:
-        tele1, tele2 = self.get_teleporters()
-        if not tele1 or not tele2:
-            return self.distance(a, b)
+    def _euclidean(self, a: Position, b: Position) -> float:
+        """Menghitung jarak Euclidean antara dua posisi."""
+        return math.hypot(a.x -b.x,a.y-b.y)
+    
+    def _explore_safely(self, current_pos: Position, board: Board) -> Tuple[int, int]:
+        """Logika untuk menjelajahi area aman dan kurang dikunjungi."""
+        candidate_moves = [(1,0), (-1,0), (0,1), (0,-1)]
+        safe_moves = []
 
-        direct_distance = self.distance(a, b)
-        tele_distance_1 = self.distance(a, tele1.position) + self.distance(tele2.position, b)
-        tele_distance_2 = self.distance(a, tele2.position) + self.distance(tele1.position, b)
-        return min(direct_distance, tele_distance_1, tele_distance_2)
+        for move in candidate_moves:
+            if self._is_valid_and_safe_move(current_pos, move):
+                safe_moves.append(move)
+        
+        if safe_moves:
+            # Prioritaskan gerakan yang tidak mundur dari posisi terakhir
+            non_reverse_moves = []
+            if self.last_position:
+                # Hitung delta dari last_position ke current_pos
+                last_delta_x = current_pos.x - self.last_position.x
+                last_delta_y = current_pos.y - self.last_position.y
+                reverse_move = (-last_delta_x, -last_delta_y) # Gerakan yang akan kembali ke last_position
 
-    def move_towards(self, target: Position) -> Tuple[int, int]:
-        delta_x = target.x - self.my_bot.position.x
-        delta_y = target.y - self.my_bot.position.y
-        if abs(delta_x) > abs(delta_y):
-            step = (1 if delta_x > 0 else -1, 0)
-        else:
-            step = (0, 1 if delta_y > 0 else -1)
+                for move in safe_moves:
+                    if move != reverse_move:
+                        non_reverse_moves.append(move)
+            
+            if non_reverse_moves:
+                return non_reverse_moves[0] # Ambil gerakan non-mundur pertama
+            else:
+                return safe_moves[0] # Jika semua gerakan adalah mundur, ambil saja yang pertama
 
-        new_x = self.my_bot.position.x + step[0]
-        new_y = self.my_bot.position.y + step[1]
+        return (0, 0) # Tetap di tempat jika tidak ada gerakan aman
 
-        if 0 <= new_x < self.board.height and 0 <= new_y < self.board.width:
-            return step
-        else:
-            # Reverse if out of bounds
-            return (-step[0], -step[1])
+    def _find_safe_alternative_move(self, current_pos: Position, avoid_reverse: bool = True) -> Tuple[int, int]:
+        """Mencari gerakan alternatif aman, dengan current_pos sebagai referensi."""
+        possible_moves = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+        
+        non_reverse_moves = []
+        all_safe_moves = []
 
-    def move_towards_with_teleporter(self, dest: Position) -> Tuple[int, int]:
-        dist_direct = self.distance(self.my_bot.position, dest)
-        dist_tele = self.distance_with_teleporter(self.my_bot.position, dest)
-
-        if dist_tele < dist_direct:
-            tele = self.get_closer_teleporter()
-            if tele:
-                return self.move_towards(tele.position)
-        return self.move_towards(dest)
-
-    def move_towards_base(self) -> Tuple[int, int]:
-        return self.move_towards_with_teleporter(self.my_bot.properties.base)
-
-    def get_teleporters(self) -> Tuple[Optional[GameObject], Optional[GameObject]]:
-        teleporters = [obj for obj in self.board.game_objects if obj.type == "TeleportGameObject"]
-        if len(teleporters) == 2:
-            return teleporters[0], teleporters[1]
-        return None, None
-
-    def get_closer_teleporter(self) -> Optional[GameObject]:
-        tele1, tele2 = self.get_teleporters()
-        if not tele1 or not tele2:
-            return None
-        dist1 = self.distance(self.my_bot.position, tele1.position)
-        dist2 = self.distance(self.my_bot.position, tele2.position)
-        return tele1 if dist1 < dist2 else tele2
+        for move in possible_moves:
+            # Memeriksa keamanan dan validitas posisi baru
+            is_valid_and_safe = self._is_valid_and_safe_move(current_pos, move)
+            
+            if is_valid_and_safe:
+                all_safe_moves.append(move)
+                # Periksa apakah gerakan ini akan membalikkan posisi terakhir
+                if self.last_position:
+                    last_delta_x = current_pos.x - self.last_position.x
+                    last_delta_y = current_pos.y - self.last_position.y
+                    reverse_move = (-last_delta_x, -last_delta_y)
+                    
+                    if move != reverse_move:
+                        non_reverse_moves.append(move)
+                else: # Jika belum ada last_position, semua non-reverse
+                    non_reverse_moves.append(move)
+        
+        if avoid_reverse and non_reverse_moves:
+            return non_reverse_moves[0]
+        elif all_safe_moves:
+            return all_safe_moves[0]
+            
+        return (0, 0)
