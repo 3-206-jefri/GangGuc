@@ -1,2 +1,2 @@
-# GangGucci
+# GangGucc
 Tubes Stimma
