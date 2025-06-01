@@ -5,10 +5,12 @@ from game.models import GameObject, Board, Position
 class GreedyJamalLogic(BaseLogic):
 
     def __init__(self):
-        self.search_radius = 12
-        self.safe_return_margin = 2
-        self.safe_enemy_distance = 3
+        self.search_radius = 15
+        self.safe_return_margin = 3
+        self.safe_enemy_distance = 4
         self.visited_positions = set()
+        self.tackle_distance = 2
+        self.min_diamonds_to_tackle = 3
 
     def next_move(self, board_bot: GameObject, board: Board) -> Tuple[int, int]:
         self.board = board
@@ -19,29 +21,60 @@ class GreedyJamalLogic(BaseLogic):
         diamonds_in_inventory = self.my_bot.properties.diamonds
         inventory_size = self.my_bot.properties.inventory_size
 
+        # Check for tackle opportunities first
+        tackle_target = self.should_tackle()
+        if tackle_target:
+            print(f"Attempting to tackle enemy at {tackle_target.position}")
+            return self.tackle(tackle_target)
+
         enemies_close = self.enemies_within_distance(self.safe_enemy_distance)
 
-        # If enemies too close, retreat to base immediately
+        # If enemies too close and we can't tackle, retreat to base
         if enemies_close and dist_to_base > 0:
             print("Enemy nearby! Retreating to base for safety.")
             return self.move_towards_base()
 
-        # Return to base if almost full or time critical considering margin
+        # Return to base if almost full or time critical
         if diamonds_in_inventory >= inventory_size - 1 or time_left <= dist_to_base + self.safe_return_margin:
             if diamonds_in_inventory > 0:
                 print("Inventory nearly full or time short. Returning to base.")
                 return self.move_towards_base()
 
-        # Gather diamonds within search radius
+        # Gather diamonds with improved selection
         nearby_diamonds = self.get_collectable_diamonds(self.search_radius, inventory_size - diamonds_in_inventory)
         if nearby_diamonds:
-            best_diamond = self.choose_best_diamond(nearby_diamonds)
+            best_diamond = self.choose_best_diamond_improved(nearby_diamonds)
             print(f"Moving towards diamond at {best_diamond.position} worth {best_diamond.properties.points}.")
             return self.move_towards_with_teleporter(best_diamond.position)
 
-        # No diamonds found, explore less visited safe tiles nearby
-        print("No diamonds nearby, exploring safe area.")
-        return self.explore_safely()
+        # No diamonds found, explore strategically
+        print("No diamonds nearby, exploring strategically.")
+        return self.explore_strategically()
+
+    def should_tackle(self) -> Optional[GameObject]:
+        """Determine if we should tackle an enemy based on strategic conditions"""
+        if self.my_bot.properties.diamonds < self.min_diamonds_to_tackle:
+            return None
+            
+        enemies = [bot for bot in self.board.bots if bot != self.my_bot]
+        
+        for enemy in enemies:
+            distance = self.distance_with_teleporter(self.my_bot.position, enemy.position)
+            
+            # Only tackle if enemy is close and has significant diamonds
+            if (distance <= self.tackle_distance and 
+                enemy.properties.diamonds >= self.min_diamonds_to_tackle):
+                
+                # Additional check: make sure we're not too far from base
+                base_dist = self.distance_with_teleporter(self.my_bot.position, self.my_bot.properties.base)
+                if base_dist <= 10:  # Only tackle if relatively close to base
+                    return enemy
+        
+        return None
+
+    def tackle(self, target: GameObject) -> Tuple[int, int]:
+        """Move towards enemy to tackle them"""
+        return self.move_towards_with_teleporter(target.position)
 
     def enemies_within_distance(self, n: int) -> List[GameObject]:
         enemies = [bot for bot in self.board.bots if bot != self.my_bot]
@@ -56,34 +89,72 @@ class GreedyJamalLogic(BaseLogic):
                 diamonds.append(d)
         return diamonds
 
-    def choose_best_diamond(self, diamonds: List[GameObject]) -> GameObject:
-        # Sort by diamond points descending, then by distance ascending
-        diamonds_sorted = sorted(
-            diamonds,
-            key=lambda d: (-d.properties.points, self.distance_with_teleporter(self.my_bot.position, d.position))
-        )
-        return diamonds_sorted[0]
+    def choose_best_diamond_improved(self, diamonds: List[GameObject]) -> GameObject:
+        """Improved diamond selection considering safety and efficiency"""
+        scored_diamonds = []
+        
+        for diamond in diamonds:
+            distance = self.distance_with_teleporter(self.my_bot.position, diamond.position)
+            points = diamond.properties.points
+            
+            # Calculate safety score (distance from enemies)
+            enemies = [bot for bot in self.board.bots if bot != self.my_bot]
+            min_enemy_dist = min([self.distance_with_teleporter(diamond.position, e.position) 
+                                 for e in enemies], default=100)
+            
+            # Score formula: prioritize points, minimize distance, maximize safety
+            efficiency_score = points / max(1, distance)  # Points per distance unit
+            safety_score = min(min_enemy_dist, 10)  # Cap safety bonus
+            
+            total_score = efficiency_score + (safety_score * 0.2)
+            scored_diamonds.append((diamond, total_score))
+        
+        # Return diamond with highest score
+        return max(scored_diamonds, key=lambda x: x[1])[0]
 
-    def explore_safely(self) -> Tuple[int, int]:
-        # Explore tiles around that are farthest from enemies and closer to center, also considering board boundaries
+    def explore_strategically(self) -> Tuple[int, int]:
+        """Strategic exploration towards diamond-rich areas"""
         center = Position(self.board.height // 2, self.board.width // 2)
-        candidate_tiles = self.get_adjacent_positions(self.my_bot.position)
-
+        candidate_tiles = self.get_extended_positions(self.my_bot.position, 2)
+        
         safe_tiles = []
         enemies = [bot for bot in self.board.bots if bot != self.my_bot]
+        
         for tile in candidate_tiles:
-            dist_to_enemy = min([self.distance_with_teleporter(tile, e.position) for e in enemies], default=100)
-            if dist_to_enemy > self.safe_enemy_distance and (tile.x, tile.y) not in self.visited_positions:
-                safe_tiles.append((tile, dist_to_enemy))
+            # Check safety
+            min_enemy_dist = min([self.distance_with_teleporter(tile, e.position) 
+                                 for e in enemies], default=100)
+            
+            if (min_enemy_dist > self.safe_enemy_distance and 
+                (tile.x, tile.y) not in self.visited_positions):
+                
+                # Score based on distance to center and potential diamond areas
+                center_dist = self.distance_with_teleporter(tile, center)
+                exploration_score = min_enemy_dist - (center_dist * 0.1)
+                
+                safe_tiles.append((tile, exploration_score))
 
         if not safe_tiles:
             return self.move_towards_base()
 
-        # Pick tile with max enemy distance, tie break closer to center
-        best_tile = max(safe_tiles, key=lambda t: (t[1], -self.distance_with_teleporter(t[0], center)))[0]
-        self.visited_positions.add((best_tile.x, best_tile.y))  # Mark as visited
-        print(f"Exploring safely towards {best_tile}")
+        # Pick tile with best exploration score
+        best_tile = max(safe_tiles, key=lambda t: t[1])[0]
+        self.visited_positions.add((best_tile.x, best_tile.y))
+        print(f"Exploring strategically towards {best_tile}")
         return self.move_towards_with_teleporter(best_tile)
+
+    def get_extended_positions(self, pos: Position, radius: int) -> List[Position]:
+        """Get positions within a certain radius"""
+        positions = []
+        for dx in range(-radius, radius + 1):
+            for dy in range(-radius, radius + 1):
+                if dx == 0 and dy == 0:
+                    continue
+                new_pos = Position(pos.x + dx, pos.y + dy)
+                if (0 <= new_pos.x < self.board.height and 
+                    0 <= new_pos.y < self.board.width):
+                    positions.append(new_pos)
+        return positions
 
     def get_adjacent_positions(self, pos: Position) -> List[Position]:
         candidates = [
@@ -122,7 +193,6 @@ class GreedyJamalLogic(BaseLogic):
         if 0 <= new_x < self.board.height and 0 <= new_y < self.board.width:
             return step
         else:
-            # Reverse if out of bounds
             return (-step[0], -step[1])
 
     def move_towards_with_teleporter(self, dest: Position) -> Tuple[int, int]:
