@@ -6,7 +6,7 @@
 
 ## 1. Penjelasan Singkat
 
-GangGuc merupakan proyek Tugas Besar mata kuliah Strategi Teknik Informatika Manajemen dan Multi Agen (STIMMA) yang melibatkan pengembangan bot AI untuk bermain dalam game berbasis maze dengan strategi tertentu. Bot diimplementasikan menggunakan Python dan berinteraksi dengan game engine berbasis web menggunakan API.
+GangGuc merupakan proyek Tugas Besar mata kuliah Strategi Teknik Informatika Strategi Algoritma yang melibatkan pengembangan bot AI untuk bermain dalam game berbasis maze dengan strategi tertentu. Bot diimplementasikan menggunakan Python dan berinteraksi dengan game engine berbasis web menggunakan API.
 
 ---
 
