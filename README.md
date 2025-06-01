@@ -92,8 +92,7 @@ GangGuc merupakan proyek Tugas Besar mata kuliah Strategi Teknik Informatika Str
 3. **Menjalankan Satu Bot:**
    Jalankan command berikut di terminal baru:
    ```bash
-   python main.py --logic Slamet --email=your_email@example.com --name=your_name --password=your_password --team etimo
-   python main.py --logic Jamal --email=your_email@example.com --name=your_name --password=your_password --team etimo
+   python main.py --logic Random --email=your_email@example.com --name=your_name --password=your_password --team etimo
    ```
 
    > Gantilah `your_email`, `your_name`, dan `your_password` sesuai keinginanmu.
